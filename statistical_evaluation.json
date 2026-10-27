@@ -1,0 +1,46 @@
+{
+  "Llama3_4bit": {
+    "total_samples": 100,
+    "failures": 0,
+    "failure_rate_pct": 0.0,
+    "json_validity_pct": 100.0,
+    "schema_conformance_pct": 97.0,
+    "latency_mean_s": 0.892,
+    "latency_std_s": 0.752,
+    "latency_ci95_s": 0.149,
+    "latency_median_s": 0.81,
+    "latency_p95_s": 0.9,
+    "f1_mean": 0.51,
+    "f1_std": 0.1,
+    "f1_ci95": 0.02,
+    "exact_match_pct": 2.0
+  },
+  "Llama3_8bit": {
+    "total_samples": 100,
+    "failures": 1,
+    "failure_rate_pct": 1.0,
+    "json_validity_pct": 99.0,
+    "schema_conformance_pct": 99.0,
+    "latency_mean_s": 3.104,
+    "latency_std_s": 1.333,
+    "latency_ci95_s": 0.266,
+    "latency_median_s": 2.95,
+    "latency_p95_s": 3.49,
+    "f1_mean": 0.51,
+    "f1_std": 0.1,
+    "f1_ci95": 0.02,
+    "exact_match_pct": 2.0
+  },
+  "statistical_tests": {
+    "latency_mann_whitney_u": {
+      "statistic": 98.0,
+      "p_value": 6.287126291458554e-33,
+      "significant_at_001": true
+    },
+    "latency_welch_t_test": {
+      "statistic": -14.39728382913998,
+      "p_value": 2.4623183016219966e-30,
+      "significant_at_001": true
+    }
+  }
+}

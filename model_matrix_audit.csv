@@ -1,0 +1,14 @@
+family,model_name,quantization,ollama_tag,status,reason
+Llama,Llama-3.1-8B,Q4_K_M,llama3.1:8b-instruct-q4_K_M,SKIPPED,SKIPPED: Ollama local daemon offline on host
+Llama,Llama-3.1-8B,Q8_0,llama3.1:8b-instruct-q8_0,SKIPPED,SKIPPED: Ollama local daemon offline on host
+Llama,Llama-3-8B,Q4_K_M,llama3,SKIPPED,SKIPPED: Ollama local daemon offline on host
+Llama,Llama-3-8B,Q8_0,llama3:8b-instruct-q8_0,SKIPPED,SKIPPED: Ollama local daemon offline on host
+Llama,Llama-3.2-3B,Q4_K_M,llama3.2:3b,SKIPPED,SKIPPED: Ollama local daemon offline on host
+Llama,Llama-3.2-1B,Q4_K_M,llama3.2:1b,SKIPPED,SKIPPED: Ollama local daemon offline on host
+Qwen,Qwen-2.5-7B,Q4_K_M,qwen2.5:7b,SKIPPED,SKIPPED: Ollama local daemon offline on host
+Qwen,Qwen-2.5-7B,Q8_0,qwen2.5:7b-instruct-q8_0,SKIPPED,SKIPPED: Ollama local daemon offline on host
+Qwen,Qwen-2.5-3B,Q4_K_M,qwen2.5:3b,SKIPPED,SKIPPED: Ollama local daemon offline on host
+Qwen,Qwen-2.5-1.5B,Q4_K_M,qwen2.5:1.5b,SKIPPED,SKIPPED: Ollama local daemon offline on host
+Phi,Phi-3.5-mini,Q4_K_M,phi3.5:3.8b,SKIPPED,SKIPPED: Ollama local daemon offline on host
+Phi,Phi-3-mini,Q4_K_M,phi3:mini,SKIPPED,SKIPPED: Ollama local daemon offline on host
+Phi,Phi-3-mini,Q8_0,phi3:3.8b-mini-instruct-4k-q8_0,SKIPPED,SKIPPED: Ollama local daemon offline on host
