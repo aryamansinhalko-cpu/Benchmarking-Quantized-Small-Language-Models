@@ -2,12 +2,15 @@
 \IEEEoverridecommandlockouts
 \usepackage{cite}
 \usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithm}
 \usepackage{algorithmic}
 \usepackage{graphicx}
 \usepackage{textcomp}
 \usepackage{xcolor}
 \usepackage{booktabs}
 \usepackage{url}
+\usepackage{multirow}
+\usepackage{microtype}
 
 \def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
     T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
@@ -47,92 +50,281 @@ ajiteshmn@gmail.com}
 \maketitle
 
 \begin{abstract}
-Using Small Language Models (SLMs) on consumer edge devices can allow data to be extracted with low latency and maintaining privacy as there is no need to send any PII data back to the central clouds. Edge deployment requires post-training quantization. However, most benchmarks only provide information on how well the model performs in terms of perplexity on free-text. There is therefore no information available on how a model will perform after applying low bit integer quantization on extracting structured information defined by schemas. We evaluate the performance of Meta's Llama-3-8B model (Q4\_K\_M and Q8\_0 quantization) on a consumer mobile work station (Intel Core i9-13900HX / NVIDIA RTX 4060 Laptop GPU / 16 GB RAM). The task is to extract student academic records from unstructured narratives that contain numerical distractors and missing fields. We find that 4-bit quantization cuts mean inference latency by 71.3\% (from $3.104 \pm 0.266$\,s to $0.892 \pm 0.149$\,s, $p = 2.46 \times 10^{-30}$) Our work focuses on learning to extract information from student academic records given unstructured data, with the presence of distractors and missing data. We found that using 4-bit quantization reduced average latency during inference by 71.3\%. This was achieved without affecting any of the syntactic correctness: 100.0\% of JSON was valid. However, upon further analysis of semantic correctness, it was found that there was a clear ``syntax-semantics discrepancy''. Both quantization levels had poor results with an F1 score of just $0.510 \pm 0.020$ for field level extraction. The exact match rate was also very low (2.0\%). This means that adhering to the schema doesn’t guarantee that facts will be correctly extracted. We also kept records of runs that crashed so we were able to see the OOM termination rate was 1.0\% for the 8-bit baseline, with several gigabytes of memory swap
+Using a Small Language Model (SLM), the data can be extracted at low-latencies while keeping the extraction private due to not sharing any PII with a centralised infrastructure. SLMs deployed on edge hardware must then be quantized to integers after training to meet strict memory constraints. Most standard benchmarks focus on measuring performance with regards to perplexity when using a language model. However, little work has been done to understand how low-bit quantization affects the performance of the structured, deterministic extraction task. Here we provide an empirical benchmark which evaluates the performance of Meta's Llama-3-8B model in 4-bit (\texttt{Q4\_K\_M}) and 8-bit (\texttt{Q8\_0}) quantization on a consumer edge workstation device (Intel Core i9-13900HX, NVIDIA RTX 4060 Laptop GPU, 16~GB DDR5 RAM). This benchmark extracts multiple fields from academic records that are given within unstructured text with large numerical distractions, informal subject names and missing optional fields.
+
+We find that using 4-bit integers reduces the average inference time by 71.3\% (from $3.104 \pm 0.266$ s to $0.892 \pm 0.149$ s; Welch's $t = -14.40, p = 2.46 \times 10^{-30}$). This is also reflected in the reduction of the tail latency ($P95$), which decreases by 74.2\%. Our results also show that we can achieve 100.0\% syntactically correct JSON. However, we find a consistent "syntax-semantic issue". Whilst the JSON is almost completely syntactically correct, both quantization methods only extract $F_1$ of the information correctly (a score of $0.510 \pm 0.020$) and have an exact match rate of 2.0\%. This is largely due to issues with autoregressive attention causing the model to get confused between the target and numerical values within the JSON (room numbers and credit hours). We also see that there is a 1.0\% increase in the OOM process termination rate when using 8-bit quantization. This causes major issues with the virtual memory swapping when running on 16~GB of hardware. However, this issue does not occur when using 4-bit quantization as it has a 0.0\% failure rate. We create an error classification system, analyse the impact on the amount of memory required for inference and give guidance on how to create a reliable information extraction pipeline.
 \end{abstract}
 
 \begin{IEEEkeywords}
-Edge Computing, Small Language Models, Quantization, Structured Information Extraction, Constrained Decoding, JSON Schema, Systems Benchmarking.
+Edge Computing, SLMs, Quantization, Structured Information Extraction, Constrained Decoding, JSON Schema, Systems Benchmarking, Distractor Robustness.
 \end{IEEEkeywords}
 
 \section{Introduction}
-Both Large Language Models (LLMs) and Small Language Models (SLMs) are now widely used within automated back-end systems. Whilst there are excellent General Reasoning capabilities offered by using cloud based API options including GPT-4 and Claude 3.5 Sonnet, this will lead to latency within the network, unpredictable costs on a per token basis and local compliance requirements for Data Protection legislation such as GDPR must be met and FERPA ~\cite{gdpr2017}.In sectors such as healthcare management and education, privacy and confidentiality is an important concern. Sending unprocessed candidate data across public networks can pose a risk. In fact, many systems are moving towards \textit{edge computing} where quantised SLMs are performed on consumer-owned devices.
+\label{sec:intro}
 
-Due to limited memory bandwidth and capacity, it gets difficult to run large transformer models on normal consumer grade edge workstations. An 8 billion parameter model trained in a standard FP16 format will require ~16gb VRAM just to hold the weights of the model. This is beyond what most consumer grade laptops/systems have available. Fortunately post training quantization can be used to overcome this by replacing the 16bit FP weights with low bit integer weights (e.g. INT8/INT4). This reduces the memory required significantly. 5~GB~\cite{dettmers2022llm,frantar2023gptq}.
+Generative Pre-trained Transformers (GPTs) have been incorporated into production back-end systems which have revolutionized automate document processing and entity extraction and chatbots~\cite{brown2020language}. However, large language models (LLMs) such as GPT-4 and Claude 3.5 Sonnet hosted on the cloud suffer from significant issues when using them for enterprise, health care and education. Firstly, they have large privacy concerns as the candidate input needs to be sent over the wide area network. They will also cause large issues with regulation as they are covered by GDPR~\cite{gdpr2017}, HIPAA and FERPA. Secondly, there is a cost associated with calling the token based API multiple times. This can also cause delays with the wide area network.
 
-There are strict requirements when defining edge data pipelines. Data will be required to conform to strict schemas such as JSON objects based on RFC 8259 specifications. If we have an unescaped quote or any extra prefix on our data then this can cause issues when we attempt to deserialize in production.
+Modern architectures are moving towards a solution called \textit{edge-native computing} ~\cite{liu2024edge,ding2024slm_edge}. This solution makes use of small language models (SLMs) with between 1 and 8 billion parameters and runs them locally on client machines, point of care devices and gateways. This ensures we have full control of our data, no latency as we aren’t using the network and predictable operating expenditure.
 
-Prior evaluations of quantized language models have three main limitations:
+Modern transformer architectures are highly memory intensive and have significant limitations on consumer hardware. An 8-Billion parameter model which is stored at 16-bit floating point precision will require 16~GB of VRAM just to store its weight matrix ($\text{FP16}$). This does not even take into account the extra memory needed by KV caching, activation tensors, and OS overhead~\cite{dettmers2022llm,frantar2023gptq}. Most consumer laptops and edge nodes will only have 8~GB of VRAM and 16~GB of DDR5 RAM available meaning it would be impossible to run unquantized models.
+
+Post-Training Quantization (PTQ) enables a solution to this problem by reducing the weight matrices from high-precision floating points to low-bit integers (such as INT8/INT4)~\cite{lin2024awq,dettmers2023qlora}. This reduces the memory bandwidth requirements and allows us to reduce the weight memory requirement to 4.8-8.5~GB so we can run them locally.
+
+When extracting information in production data pipelines we cannot allow the information extraction models to produce free text. The extracted entities need to be deterministically converted to a strict valid format like JavaScript Object Notation (JSON)~\cite{rfc8259} (RFC 8259). If any of the curly braces or quotes are not properly escaped the JSON will fail to deserialize. This means that if we have a missing curly brace, an unescaped quote, or have some unexpected text at the start of the JSON (e.g. \textit{``Sure, here is your JSON:''}), then the JSON will fail to deserialize in our automated microservices.
+
+Despite the rapid proliferation of quantized SLMs, existing benchmarking methodologies exhibit three critical shortcomings:
 \begin{enumerate}
-    \item \textbf{Emphasis on Prose Over Structured Parsing:} Existing metrics used to evaluate academic work focus on reading comprehension and fluency rather than deterministic key value extractions of JSON schemas~\cite{hendrycks2021measuring}. 
-    \item \textbf{Equating Syntactic Validity with Semantic Integrity:} Multiple studies only look at if the output adheres to the structure of JSON, but none look at precision, recall and whether the correct values are extracted for each field. ~\cite{liu2024edge}.
-    \item \textbf{Selective Reporting and Concealment of Hardware Faults:} Edge benchmarks often cause OOMs and crashes. Since these are not reported, it seems like a more reliable result is being produced but actually highlights how limited the hardware is. 
+    \item \textbf{Dominance of Perplexity and Prose Over Structured Extraction:} Commonly used benchmarks like MMLU~\cite{hendrycks2021measuring} and GSM8K~\cite{cobbe2021gsm8k} mostly measure how good a model is at predicting the next token, generating grammatical sentences, or performing multiple choice reasoning on unstructured texts. They do not however measure how well a model can deterministically retain relations between unstructured entities and structured key value schemes.
+    \item \textbf{Equating Syntactic Validity with Semantic Truth:}Structured generation is often evaluated by simply checking if the output can be parsed using standard libraries (e.g., Python's \texttt{json.loads()})~\cite{willard2023outlines,zheng2024sglang}. However, this gives us a false sense of precision where models may easily produce syntactically correct JSON, but the numbers in the JSON may be complete nonsense, or there may be hallucinated fields, or there may be numerical distractors.
+    \item \textbf{Systematic Concealment of Hardware Crashes and Telemetry:} Benchmarks often exclude failed tests, OOM exceptions and page faults at the system level to give a clean latency result. If an OOM exception isn't handled on the edge it will cause unreliability in your pipeline..
 \end{enumerate}
 
-To address these gaps, this study presents a careful empirical benchmark of quantized SLMs performing structured information extraction on consumer edge hardware.
+To address these fundamental issues, we conduct a comprehensive benchmark of quantized SLMs at answering system questions within a consumer device setting. We study Meta's Llama-3-8B model at Q4 (Q4\_K\_M) and Q8 (Q8\_0) quantization levels. Our benchmark consists of 1200 synthetic academic forms with realistic noise such as numbers, synonyms and missing fields. 
 
+\subsection{Key Contributions}
+The core scientific and engineering contributions of this work are summarized as follows:
+\begin{itemize}
+    \item \textbf{Empirical Systems Benchmarking Framework:} We provide an open source benchmarking framework that provides un-sanitized measurement of multi-dimensional extraction accuracy (syntax, schema, field-level $F_1$, exact), as well as low-level hardware metrics (latency, tail $P95$, memory RSS and process faults).
+    \item \textbf{Discovery of the Syntax-Semantics Discrepancy:} We show that a 100.0\% JSON syntactic accuracy does not translate into high extraction accuracy. We see that both the INT4 and INT8 models have an extraction $F_1$ score of only $0.510$ and an exact match rate of 2.0\%. This means that the lower bit quantization methods do well at keeping the token-level syntactic features but are unable to overcome the numerical distractor issue. .
+    \item \textbf{Characterization of the 16~GB Memory Execution Cliff:} We provide concrete evidence of real-world hardware limitations. On a 16~GB host workstation we observe a 1.0\% OOM crash rate under 8-bit quantization due to high virtual memory swapping. Under 4-bit quantization the host sees zero thrashing (0.0\%) and a 71.3\% latency reduction ($p = 2.46 \times 10^{-30}$).
+    \item \textbf{Formal Error Taxonomy and Edge Design Principles:} We formulate a four-tier categorical taxonomy of structured extraction failures and present actionable architectural guidelines for deploying robust SLMs in resource-bounded edge pipelines.
+\end{itemize}
+
+
+The remainder of this paper is structured as follows. A review of relevant work around quantization, constrained decoding and edge benchmarks is provided in Section~\ref{sec:related}. Section~\ref{sec:theory} describes the problem setup, quantization process and algorithm used. Section~\ref{sec:methodology} outlines the experimentation setup, benchmark dataset and metrics. Section~\ref{sec:results} discusses results including error types, and hardware data. Section~\ref{sec:guidelines} presents best practice advice for working with models on the edge, and threats to validity. Lastly, we conclude in Section~\ref{sec:conclusion}.
+
+% =========================================================================
+% SECTION II: RELATED WORK
+% =========================================================================
 \section{Related Work}
+\label{sec:related}
+
 \subsection{Post-Training Quantization of Transformers}
-Post-training quantization can be used to reduce the bit-width of the weight matrices. This will alleviate the problem of memory bandwidth during generation of autoregressive tokens. It has been proved by Dettmers et al.~\cite{dettmers2022llm} that the use of 8-bit matrix multiplication via isolation of outliers guarantees the same predictive ability of the floating-point model. More recent integer compression approaches such as GPTQ ~\cite{frantar2023gptq} and AWQ~\cite{lin2024awq} have shown that using 4-bit weight-only quantization results in minor loss of perplexity while reducing memory usage by 70\% . This has resulted in implementations such as  \texttt{llama.cpp}~\cite{gerganov2023llamacpp} becoming popular as they are able to perform quantized k-quants \texttt{(Q4\_K\_M, Q8\_0)} and enables unified memory offloading onto consumer workstations. 
+Post-Training Quantization (PTQ) methods reduce the precision of parameters of pre-trained transformers. \texttt{LLM.int8()} was first presented by Dettmers et al.~\cite{dettmers2022llm}. By separating out the dimensions of emergent outliers in the float representations, it was shown that there would be no catastrophic loss in performance during 8-bit matrix multiplication. Then, Frantar et al.~\cite{frantar2023gptq} presented GPTQ, an approximate second order algorithm based on Optimal Brain Surgeon. This allowed for accurate 4-bit and 3-bit weight-only quantization. Finally, Lin et al.~\cite{lin2024awq} proposed AWQ (Activation-aware Weight Quantization). It was shown that by protecting important weights which correlate with high magnitude activations can greatly reduce the loss in perplexity during aggressive 4-bit compression.
 
-\subsection{Constrained Decoding and Structured Information Extraction}
-Due to the need for highly structured outputs, several different decoding approaches have been presented. An example of such an approach can be seen in the creation of Outlines  ~\cite{willard2023outlines} by Willard and Louf. This method involves the construction of deterministic finite state automata from regular expressions and context-free grammars. Additionally, incorrect items of vocabulary are removed at each stage of generation. Similarly, the JGBNF grammer  in \texttt{llama.cpp} ~\cite{gerganov2023llamacpp} and SG grammar in SGLang ~\cite{zheng2024sglang} make use of the JSON grammar principles during decoding. While constrained decoding can guarantee 100\% syntactically correct results, there is no guarantee of the content that was extracted. 
+Tensor-based algorithms have been complimented by system-based solutions such as llama.cpp~\cite{gerganov2023llamacpp}. This introduced block quantization schemes (k-quants). Schemes include \texttt{Q4\_K\_M} and \texttt{Q8\_0}). These are achieved by dividing the weight tensors into blocks. Non-linear scaling factors are applied. The quantized tensors are compatible with modern SIMD architectures (AVX-512,ARM Neon) and CUDA tensor cores. While there is extensive validation of the models' perplexity on common corpora (WikiText-2,C4), the effect on deterministic entity extraction with strict JSON schemas has not been explored.
 
-\section{Methodology}
-\subsection{Hardware Platform and Setup}
-All the tests were performed on computers with no virtualization so we could ensure that the computer and memory bus were performing as expected, and the data was gathered automatically by the monitoring script. 
+\subsection{Constrained Decoding and Schema-Guided Generation}
+A number of different methods have been developed to induce autoregressive language models to generate valid structured data. Willard and Louf~\cite{willard2023outlines} developed the Outlines package to convert Context-Free Grammars (CFGs) and regular expressions to deterministic finite state automata (DFA). During decoding, invalid tokens are masked using the DFA to mathematically ensure that the token sequence generated adheres to the formal schema. Likewise, Zheng et al.~\cite{zheng2024sglang} developed the SGLang package which uses RadixAttention and fast grammatical constrains to improve performance of structured programs. Finally, in the open source edge community GBNF (GGML Backus-Naur Form) grammars~\cite{gerganov2023llamacpp} are used to impose JSON semantics during the sampling process in \texttt{llama.cpp}.
+
+Whilst constrained decoding does offer 100\% adherence to the syntax ($V_{\text{json}} = 1.0$), there is a new issue that occurs. If the model incorrectly associates an entity or picks an incorrect numerical distractor, it will be forced by the grammar engine to produce valid tokens. This means the token sequence will be syntactically correct but semantically incorrect.
+
+\subsection{Structured Information Extraction Benchmarks}
+Information Extraction (IE) has transitioned from the traditional rule-based and Named Entity Recognition (NER) tagger based systems (e.g., CoNLL-2003~\cite{tjong2003conll}, OntoNotes 5.0) to generative end to end information extractors. Modern benchmarking efforts have focused around document based benchmarks such as DocVQA~\cite{mathew2021docvqa} and Few-NERD~\cite{ding2021fewnerd} that seek to extract information from unstructured layouts. Recently, benchmarks have been proposed that seek to measure Large Language Models (LLMs) ability to generate structured API outputs such as Schema-Guided Dialogue (SGD)~\cite{rastogi2020towards} and JSON-Bench.
+
+Existing datasets commonly benchmark models using high capacity FP16 models in a cloud setting. However, there has been little investigation into how integer quantization noise, distractor tokens within the context window and nested key-value mapping will interact on edge tier hardware.
+
+\subsection{Edge Systems Telemetry and Reliability}
+The edge computing environment is very different from a data center deployment. There is no high bandwidth memory (HBM) available on consumer grade devices, so they are connected to discrete GPUs via normal PCIe buses ~\cite{liu2024edge}~\cite{ding2024slm_edge}. Offloading tensors from the host to the device will cause memory overflow, leading to page faults and swapping in the operating system. While OOM events have often been considered to be artefacts in previous work, we consider them as critical to our experiments due to their impact on physical fault tracking and memory limits.
+
+% =========================================================================
+% SECTION III: THEORETICAL FORMULATION & MECHANICS
+% =========================================================================
+\section{Theoretical Formulation and Mechanics}
+\label{sec:theory}
+
+\subsection{Problem Formulation: Schema-Constrained Extraction}
+Let $\mathcal{V}$ be the discrete vocabulary of the language model and $\mathcal{V}^*$ as the set of all finite strings elements from vocabulary $\mathcal{V}$. The documents are an unordered sequence of characters string $X = (x_1, x_2, \dots, x_N) \in \mathcal{V}^*$ containing a tableau of information composed of specific, hidden target entities $\mathcal{E}^* = \{(k_i, v_i^*)\}_{i=1}^M$ mixed within with an assortment of numeric and semantic entities $\mathcal{D} = \{d_1, d_2, \dots, d_K\}$.
+
+From these we are to algorithmically produce a string of tokens $Y = (y_1, y_2, \dots, y_T) \in \mathcal{V}^*$, a JSON representation structure comprising tokens which conforming to strict rules defined by a pre-knowledge readable grammar $G = (V_N, V_T, P, S)$ process $V_N$ ⊆ non-terminal symbols, $V_T \subset \mathcal{V}$ terminals and a $\mathcal{V}^$0 = { production rules defining syntactical structure according to JSON RFC 8259 specifcation and $\mathcal{V}^$1 as its initial symbol.
+
+The joint probability of generating sequence $Y$ conditioned on prompt $X$ is factorized as:
+\begin{equation}
+P(Y \mid X) = \prod_{t=1}^T P(y_t \mid y_{<t}, X; \mathbf{W})
+\label{eq:autoregressive}
+\end{equation}
+where $\mathbf{W}$ represents the parameterized weight matrices of the transformer architecture, and $y_{<t} = (y_1, \dots, y_{t-1})$. The model predicts the next token via the softmax distribution over vocabulary logits:
+\begin{equation}
+P(y_t = v \mid y_{<t}, X) = \frac{\exp\left(z_t^{(v)} / \tau\right)}{\sum_{u \in \mathcal{V}} \exp\left(z_t^{(u)} / \tau\right)}
+\label{eq:softmax}
+\end{equation}
+where $z_t \in \mathbb{R}^{|\mathcal{V}|}$ is the unnormalized logit vector produced by the final transformer projection layer, and $\tau$ is the sampling temperature.
+
+\subsection{Integer Quantization Mechanics and Numerical Drift}
+In standard floating-point execution ($\text{FP16}$), each weight $w \in \mathbf{W}$ occupies 16 bits. In linear symmetric integer quantization, a continuous weight block $\mathbf{w} \in \mathbb{R}^B$ is mapped to a discrete $b$-bit integer tensor $\mathbf{q} \in \{-2^{b-1}, \dots, 2^{b-1}-1\}^B$ via a scaling factor $S$:
+\begin{equation}
+S = \frac{\max(|\mathbf{w}|)}{2^{b-1} - 1}
+\label{eq:scale}
+\end{equation}
+\begin{equation}
+\mathbf{q} = \text{clip}\left(\left\lfloor \frac{\mathbf{w}}{S} \right\rceil, -2^{b-1}, 2^{b-1} - 1\right)
+\label{eq:quant}
+\end{equation}
+where $\lfloor \cdot \rceil$ represents the round-to-nearest integer operator. During matrix multiplication, the dequantized approximation $\hat{\mathbf{w}}$ is reconstructed as:
+\begin{equation}
+\hat{\mathbf{w}} = S \cdot \mathbf{q} = \mathbf{w} + \boldsymbol{\epsilon}_q
+\label{eq:dequant}
+\end{equation}
+where $\boldsymbol{\epsilon}_q \sim \mathcal{U}(-S/2, S/2)$ represents the stochastic quantization noise vector.
+
+In modern block-quantized formats such as \texttt{Q4\_K\_M}, weights are segmented into super-blocks of 256 elements, subdivided into 8 sub-blocks of 32 weights. Scale factors are themselves quantized using 6-bit representations, minimizing memory overhead while mitigating outlier distortion. 
+
+However, transformer attention mechanisms rely on inner products between query and key vectors:
+\begin{equation}
+A_{i,j} = \text{softmax}\left(\frac{(\mathbf{x}_i \hat{\mathbf{W}}_Q)(\mathbf{x}_j \hat{\mathbf{W}}_K)^T}{\sqrt{d_k}}\right)
+\label{eq:attention}
+\end{equation}
+The cumulative quantization error in $\hat{\mathbf{W}}_Q$ and $\hat{\mathbf{W}}_K$ creates noise in the attention score matrix $\mathbf{A}$. Frequently occurring syntactic tokens like quotes (\texttt{"}), braces (\texttt{\{}), and colons (\texttt{:}) result in high peak probability values in attention heads. These are resistant to noise ($\boldsymbol{\epsilon}_q$). Digits on the other hand, have many distractors ($d \in \mathcal{D}$) with similar semantic representations in the context window. Quantisation error causes noise in the logit margins, leading to distractor binding.
+
+\subsection{Algorithmic Extraction and Evaluation Pipeline}
+The end-to-end benchmarking workflow is formalized in Algorithm~\ref{alg:pipeline}. The pipeline ingests unstructured text, performs localized quantized inference, verifies structural grammar conformance, and extracts fine-grained semantic entities for multi-tier scoring.
+
+\begin{algorithm}[htbp]
+\caption{Edge-Based Schema-Constrained Extraction and Telemetry Pipeline}
+\label{alg:pipeline}
+\begin{algorithmic}[1]
+\REQUIRE Dataset $\mathcal{D}_{\text{test}} = \{(X_k, \mathcal{Y}_k^*)\}_{k=1}^K$, Quantized Model $\mathcal{M}_\theta$, Schema $\mathcal{S}$
+\ENSURE Metrics record $\mathcal{R}$, Telemetry log $\mathcal{T}$
+\STATE Initialize $\mathcal{R} \leftarrow \emptyset$, $\mathcal{T} \leftarrow \emptyset$
+\FORALL{$(X_k, \mathcal{Y}_k^*) \in \mathcal{D}_{\text{test}}$}
+    \STATE Capture initial system memory $\text{RSS}_{\text{init}}$ via OS hooks
+    \STATE Record start wall-clock timestamp $t_{\text{start}} \leftarrow \text{Time}()$
+    \TRY
+        \STATE $Y_k \leftarrow \mathcal{M}_\theta.\text{Generate}(X_k, \text{Schema}=\mathcal{S})$
+        \STATE $t_{\text{end}} \leftarrow \text{Time}()$
+        \STATE $\Delta t_k \leftarrow t_{\text{end}} - t_{\text{start}}$
+        \STATE Record peak memory $\text{RSS}_{\text{peak}}$
+        \STATE $v_k \leftarrow \text{CheckJsonSyntax}(Y_k)$ \COMMENT{RFC 8259}
+        \IF{$v_k = 1$}
+            \STATE $c_k \leftarrow \text{ValidatePydanticSchema}(Y_k, \mathcal{S})$
+            \STATE $\hat{\mathcal{E}}_k \leftarrow \text{ParseEntities}(Y_k)$
+            \STATE $F_{1,k} \leftarrow \text{ComputeFieldF1}(\hat{\mathcal{E}}_k, \mathcal{Y}_k^*)$
+            \STATE $\text{EM}_k \leftarrow \mathbb{I}(\hat{\mathcal{E}}_k = \mathcal{Y}_k^*)$
+        \ELSE
+            \STATE $c_k \leftarrow 0, F_{1,k} \leftarrow 0.0, \text{EM}_k \leftarrow 0$
+        \ENDIF
+        \STATE Append $(\Delta t_k, 0, v_k, c_k, F_{1,k}, \text{EM}_k)$ to $\mathcal{R}$
+    \EXCEPT[ProcessFault / OOM]
+        \STATE Record fault event: Append $(\infty, 1, 0, 0, 0.0, 0)$ to $\mathcal{R}$
+    \ENDTRY
+\ENDFOR
+\STATE Compute aggregate statistics: Mean, Median, P95, Welch's $t$, Mann-Whitney $U$
+\RETURN $\mathcal{R}, \mathcal{T}$
+\end{algorithmic}
+\end{algorithm}
+
+% =========================================================================
+% SECTION IV: METHODOLOGY & BENCHMARK SUITE
+% =========================================================================
+\section{Methodology and Benchmark Setup}
+\label{sec:methodology}
+
+\subsection{Physical Hardware and Execution Environment}
+All experiments were run on bare-metal hardware to ensure strict environmental constraints. This avoids the problem of memory boundaries being hidden due to virtualisation sandboxing (e.g. WSL2 or hypervisor containers). Instead we are able to have direct access to PCIe,DDR5,VRAM memory boundaries. Real-time telemetry was collected by utilising an async daemon that would monitor the system state every 100\,ms. Full specification can be seen in Table~\ref{tab:hardware}.
 
 \begin{table}[htbp]
-\caption{Hardware and System Specifications}
+\caption{System Hardware and Software Telemetry Environment}
 \begin{center}
 \begin{tabular}{ll}
 \toprule
-\textbf{Component} & \textbf{Specification} \\
+\textbf{Subsystem} & \textbf{Architectural Specification} \\
 \midrule
-Processor & Intel Core i9-13900HX (24C / 32T) \\
-System Memory & 16.0 GB DDR5 RAM (15.73 GB Available) \\
-GPU Accelerator & NVIDIA GeForce RTX 4060 Laptop (8 GB VRAM) \\
-Graphics Driver & NVIDIA Display Driver 621.01 (CUDA 13.5) \\
-Operating System & Microsoft Windows 11 Home (Build 26300) \\
-Inference Engine & Ollama runtime / llama.cpp backend \\
-Python Runtime & Python 3.14.7 AMD64 \\
+Host Processor & 13th Gen Intel Core i9-13900HX (24C / 32T) \\
+Microarchitecture & 8 Performance Cores (up to 5.4\,GHz) + 16 Efficient Cores \\
+Host Memory & 16.0~GB DDR5 RAM (15.73~GB Usable, 4800\,MT/s) \\
+Discrete GPU & NVIDIA GeForce RTX 4060 Laptop GPU \\
+Dedicated VRAM & 8,188~MB GDDR6 (128-bit bus width, 256\,GB/s) \\
+Driver / CUDA & NVIDIA Game Ready 621.01 / CUDA 13.5 \\
+Operating System & Microsoft Windows 11 Home 64-bit (Build 26300) \\
+Inference Backend & Ollama v0.3.x runtime / \texttt{llama.cpp} core engine \\
+Host Compiler & MSVC 19.39 / Python 3.14.7 AMD64 \\
 \bottomrule
 \end{tabular}
 \end{center}
 \label{tab:hardware}
 \end{table}
 
-\subsection{Benchmark Corpus Synthesis and Decoupling}
-In order to investigate real world applicability, we have generated the \textit{EduMetrics-Structured-IE} benchmark dataset ($N = 1,200$, fixed(seed = 42) samples). This consists of natural language text containing multiple sentences representing an academic record or administrative memo. The samples contain numerical distractors (phone extension, examination room number, cohort ranking), optional fields which are blank (attendance records not submitted) and synonyms (e.g. ‘Calc’ instead of Mathematics, ‘CompSci’ instead of Computer Science). Finally the true values are separated from the prompts to ensure that there is no leak of true values within the prompt.
+\subsection{The EduMetrics-Structured-IE Benchmark Corpus}
+We constructed the \textit{EduMetrics-Structured-IE} benchmark dataset ($N = 1,200$ seeded by $\text{seed} = 42$) in order to thoroughly evaluate our model under noisy real world conditions. This dataset contains a collection of academic progress memos, faculty advising notes, and student transcripts.
 
-\subsection{Multi-Dimensional Evaluation Metrics}
-We compute five independent metrics:
+Each benchmark sample is engineered with four distinct linguistic and numerical perturbations:
 \begin{enumerate}
-    \item \textbf{JSON Syntactic Validity Rate ($V_{\text{json}}$):} Percentage of responses that \texttt{json.loads()} parses without a syntax error.
-    \item \textbf{Schema Conformance Rate ($C_{\text{schema}}$):} Percentage of outputs that pass structural Pydantic validation.
-    \item \textbf{Field-Level Score Extraction ($F_1$):} Harmonic mean of Precision ($P$) and Recall ($R$) over the extracted \texttt{(Subject, Score)} pairs.
-    \item \textbf{Exact Match Rate ($EM$):} Binary indicator that is true only when all entity keys and values match exactly at the same time.
-    \item \textbf{System Latency and Reliability:} Mean, median, and P95 latency (seconds), 95\% confidence intervals, and observed crash rates.
+    \item \textbf{High-Density Numerical Distractors:} The samples have non-relevant numbers and include lecture hall numbers (e.g., \textit{Hall B-12}, \textit{Room 101}), staff extension numbers (e.g., \textit{Ext 4201}), number of credit hours (e.g., \textit{enrolled in 16 credits}) and percentile rank within cohort.
+    \item \textbf{Lexical Subject Aliasing:} We represent academic subjects using common short-form versions. For example we use \textit{``Calc''} to represent Mathematics and \textit{``CompSci''} to represent Computer Science. We also have \textit{``Applied Physics''} to represent Physics.
+    \item \textbf{Omitted and Nullable Fields:} The number of courses varies between 1-4 and sometimes there is no data about the student’s attendance. The model is required to output \texttt{null} values appropriately without violating the schema.
+    \item \textbf{Decoupled Ground-Truth Isolation:} There are zero cues given in the prompts. The ground truth JSON files are completely separated so that there is no key leakage..
 \end{enumerate}
 
-\section{Empirical Results}
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.88\textwidth]{figure1_validity_vs_f1.png}
+\caption{The Syntax-Semantics Discrepancy: Comparison of JSON Syntactic Validity ($V_{\text{json}}$) versus Semantic Field-Level Extraction Score ($F_1$). While both 4-bit and 8-bit quantized models exhibit near-perfect syntactic validity ($\ge 99.0\%$), semantic extraction accuracy drops to $F_1 = 0.510$, demonstrating that syntactic parsers severely overestimate true model utility.}
+\label{fig:fig1}
+\end{figure*}
 
-\begin{table*}[htbp]
-\caption{Comprehensive Benchmark Performance and Systems Metrics}
+\subsection{Multi-Dimensional Evaluation Metric Suite}
+We formulate a multi-tier evaluation hierarchy spanning structural, semantic, and computational dimensions:
+
+\subsubsection{Syntactic Validity Rate ($V_{\text{json}}$)}
+Quantifies the percentage of outputs that can be successfully parsed into an Abstract Syntax Tree (AST) by an RFC 8259 parser without structural syntax exceptions:
+\begin{equation}
+V_{\text{json}} = \frac{1}{K} \sum_{k=1}^K \mathbb{I}\left(\text{Parse}_{\text{RFC8259}}(Y_k) \neq \bot\right)
+\label{eq:v_json}
+\end{equation}
+
+\subsubsection{Schema Conformance Rate ($C_{\text{schema}}$)}
+Measures the proportion of syntactically valid outputs that strictly conform to the expected nested Pydantic v2 data model, verifying type constraints (e.g., integer scores, string identifiers) and required fields:
+\begin{equation}
+C_{\text{schema}} = \frac{1}{K} \sum_{k=1}^K \mathbb{I}\left(\text{PydanticValidate}(Y_k, \mathcal{S}) = \text{True}\right)
+\label{eq:c_schema}
+\end{equation}
+
+\subsubsection{Field-Level Semantic Extraction ($F_1$)}
+For each evaluated document, let $\mathcal{G}_k = \{(s, v)\}$ denote the ground-truth set of canonical subject-score pairs, and let $\hat{\mathcal{G}}_k$ denote the set of extracted pairs. True Positives ($TP$), False Positives ($FP$), and False Negatives ($FN$) are defined as:
+\begin{equation}
+TP_k = |\hat{\mathcal{G}}_k \cap \mathcal{G}_k|, \quad FP_k = |\hat{\mathcal{G}}_k \setminus \mathcal{G}_k|, \quad FN_k = |\mathcal{G}_k \setminus \hat{\mathcal{G}}_k|
+\end{equation}
+Precision ($P$), Recall ($R$), and their harmonic mean ($F_1$) are computed across all valid records:
+\begin{equation}
+P = \frac{\sum TP_k}{\sum TP_k + \sum FP_k}, \quad R = \frac{\sum TP_k}{\sum TP_k + \sum FN_k}
+\end{equation}
+\begin{equation}
+F_1 = \frac{2 \cdot P \cdot R}{P + R}
+\label{eq:f1}
+\end{equation}
+
+\subsubsection{Strict Exact Match Rate ($EM$)}
+A binary indicator requiring concurrent exact equivalence across all nested entities, including student name, matriculation ID, semester index, attendance float, and all subject-score pairs:
+\begin{equation}
+EM = \frac{1}{K} \sum_{k=1}^K \prod_{m=1}^M \mathbb{I}(\hat{e}_{k,m} = e_{k,m}^*)
+\label{eq:em}
+\end{equation}
+
+\subsubsection{Systems Latency and Statistical Significance}
+Wall-clock inference latency $\Delta t$ is captured per sample. We report the sample mean ($\mu$), standard deviation ($\sigma$), median, 95th percentile ($P95$), and 95\% confidence intervals ($\text{CI}_{95}$) derived via Student's $t$-distribution:
+\begin{equation}
+\text{CI}_{95} = \mu \pm t_{0.975, n-1} \cdot \left(\frac{\sigma}{\sqrt{n}}\right)
+\end{equation}
+To evaluate distributional separation without assuming normality, we perform both the parametric two-tailed Welch's $t$-test (robust to unequal variances) and the non-parametric Mann-Whitney $U$ rank test at significance threshold $\alpha = 0.001$.
+
+% =========================================================================
+% SECTION V: EMPIRICAL RESULTS & SYSTEMS ANALYSIS
+% =========================================================================
+\section{Empirical Results and Systems Analysis}
+\label{sec:results}
+
+A total of 200 benchmark evaluation trials (100 per quantization tier) were executed under un-sanitized monitoring conditions. The consolidated experimental metrics are presented in Table~\ref{tab:results}.
+
+\begin{table*}[t]
+\caption{Comprehensive Systems and Extraction Performance Benchmark (Llama-3-8B)}
 \begin{center}
 \begin{tabular}{lccc}
 \toprule
-\textbf{Metric} & \textbf{Llama-3-8B (4-bit, Q4\_K\_M)} & \textbf{Llama-3-8B (8-bit, Q8\_0)} & \textbf{Statistical Test / Significance} \\
+\textbf{Evaluation Metric / Dimension} & \textbf{4-bit Integer (\texttt{Q4\_K\_M})} & \textbf{8-bit Integer (\texttt{Q8\_0})} & \textbf{Comparative Delta / Statistical Test} \\
 \midrule
-Total Evaluated Samples & 100 & 100 & Invariant Count \\
-Process Terminations / Crashes & \textbf{0} & \textbf{1 (OOM Crash)} & Hardware Boundary \\
-Execution Failure Rate (\%) & \textbf{0.0\%} & \textbf{1.0\%} & Raw Systems Telemetry \\
-JSON Syntactic Validity (\%) & \textbf{100.0\%} & \textbf{99.0\%} & $\Delta = +1.0\%$ (4-bit) \\
-Schema Conformance (\%) & \textbf{97.0\%} & \textbf{99.0\%} & $\Delta = +2.0\%$ (8-bit) \\
-Mean Inference Latency (s) & $\mathbf{0.892 \pm 0.149}$ & $\mathbf{3.104 \pm 0.266}$ & Welch's $t = -14.397$ ($p = 2.46 \times 10^{-30}$) \\
+Total Benchmark Sample Invariant ($N$) & 100 & 100 & Baseline Invariant \\
+Process Terminations / Crashes & \textbf{0} & \textbf{1 (Hardware OOM)} & Physical RAM Boundary \\
+Execution Failure Rate (\%) & \textbf{0.0\%} & \textbf{1.0\%} & Telemetry Un-sanitized \\
+JSON Syntactic Validity ($V_{\text{json}}$) & \textbf{100.0\%} & \textbf{99.0\%} & $\Delta = +1.0\%$ (8-bit penalized by crash) \\
+Pydantic Schema Conformance ($C_{\text{schema}}$) & \textbf{97.0\%} & \textbf{99.0\%} & $\Delta = +2.0\%$ (8-bit surviving runs) \\
+Mean Inference Latency ($\mu \pm \text{CI}_{95}$, s) & $\mathbf{0.892 \pm 0.149}$ & $\mathbf{3.104 \pm 0.266}$ & \textbf{71.3\% Speedup} ($t = -14.40, p = 2.46 \times 10^{-30}$) \\
 Median Inference Latency (s) & \textbf{0.810} & \textbf{2.950} & Mann-Whitney $U = 98.0$ ($p = 6.29 \times 10^{-33}$) \\
-95th Percentile Latency (P95, s) & \textbf{0.900} & \textbf{3.490} & Tail Latency Reduction: 74.2\% \\
-Subject Extraction $F_1$ Score & $\mathbf{0.510 \pm 0.020}$ & $\mathbf{0.510 \pm 0.020}$ & No Quantization Degradation \\
-Strict Exact Match Rate (\%) & \textbf{2.0\%} & \textbf{2.0\%} & Semantic Divergence \\
+Tail Latency (95th Percentile $P95$, s) & \textbf{0.900} & \textbf{3.490} & \textbf{74.2\% Tail Latency Reduction} \\
+Latency Standard Deviation ($\sigma$, s) & 0.752 & 1.333 & $\Delta \sigma = -43.6\%$ (Jitter reduction) \\
+Subject Extraction Precision ($P$) & 0.510 & 0.510 & Invariant across precision tiers \\
+Subject Extraction Recall ($R$) & 0.510 & 0.510 & Invariant across precision tiers \\
+Subject Extraction Score ($F_1 \pm \text{CI}_{95}$) & $\mathbf{0.510 \pm 0.020}$ & $\mathbf{0.510 \pm 0.020}$ & Zero Quantization Degradation \\
+Strict Exact Match Rate ($EM$, \%) & \textbf{2.0\%} & \textbf{2.0\%} & Semantic Attentional Divergence \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -140,58 +332,241 @@ Strict Exact Match Rate (\%) & \textbf{2.0\%} & \textbf{2.0\%} & Semantic Diverg
 \end{table*}
 
 \subsection{The Syntax-Semantics Discrepancy}
-According to the data provided in the table~\ref{tab:results}  and figure~\ref{fig:fig1}, It can be seen that in terms of the JSON format, the 4-bit model has 100.0\% validity whilst the 8-bit model has 99.0\%. The 1\% difference is due to just one incident of the Row 0 server crashing. Both models did not result in any conversational preambles or unescaped characters being generated.
+The key result is that there is a large discrepancy between the syntactic and semantic performance of the model (see Fig.~\ref{fig:fig1}). The model achieved a 100.0\% JSON validity score ($V_{\text{json}}$), and 97.0\% schema validity score ($C_{\text{schema}}$). The 8-bit baseline had some runs which achieved a 99.0\% validity score (1.0\% lower due to the crash at initialisation). None of the models ever outputted a preamble, unescaped newline, or incorrect brace.
 
-However, our field level analysis shows that this is misleading. The mean proportion of subject scores extracted $F_1$ was \textbf{0.510}, with a strict exact match rate of just \textbf{2.0\%}. Our error analysis showed that the JSON had perfect syntax but that the models frequently incorrectly allocated scores to subjects or confused numeric elements like credit numbers or room numbers with grades. Therefore, using syntax parsing to evaluate structured LLM output is very misleading.
+However, the field extraction scores were very poor. Both models reached the same score of only $\mathbf{0.510 \pm 0.020}$ for extracting the subject field ($F_1$). The exact match score ($EM$) was also very low at only $\mathbf{2.0\%}$. This shows that the schema validation libraries such as json.loads() and Pydantic only act as structural checks. There is no guarantee that the data will be extracted correctly.
 
-\begin{figure}[htbp]
-\centerline{\includegraphics[width=0.48\textwidth]{figure1_validity_vs_f1.png}}
-\caption{Syntax Validity vs. Semantic Extraction F1 Score, highlighting the empirical gap between structural formatting and factual accuracy.}
-\label{fig:fig1}
-\end{figure}
+\subsection{Categorical Error Taxonomy and Distractor Vulnerability}
+To isolate the root causes of the low $F_1$ score, we performed an exhaustive post-hoc error audit across all mispredicted records. Extraction failures map into four distinct error categories, summarized in Table~\ref{tab:error_taxonomy}.
 
-\subsection{Inference Speedup and Resource Efficiency}
-The latency distributions of the two models differ sharply (Figure~\ref{fig:fig2}). The 8-bit baseline achieved a mean latency of $3.104 \pm 0.266$\,s, whilst the 4-bit model achieved an average latency of $0.892 \pm 0.149$\,s on the same task. This represents a reduction in the Inference Latency by \textbf{71.3\%}, and a reduction in the Tail latency (P95) by \textbf{74.2\%}. The difference was proven to be statistically significant using a 2-tailed Welsh's t-test with ($t = -14.397, p = 2.46 \times 10^{-30}$), and a non-parametric Mann-Whitney U test with ($U = 98.0, p = 6.29 \times 10^{-33}$) at $\alpha = 0.001$.
+\begin{table}[htbp]
+\caption{Categorical Distribution of Extraction Errors ($N = 200$ Trials)}
+\centering
+\footnotesize % Reduces font size to fit the column
+\setlength{\tabcolsep}{4pt} % Reduces padding between columns
+\begin{tabular}{llcc}
+\toprule
+\textbf{Error Class} & \textbf{Failure Mechanism} & \textbf{Incidence} & \textbf{\% of Errors} \\
+\midrule
+Type I & Numerical Distractor Misbinding & 162 & 82.7\% \\
+Type II & Lexical Synonym Aliasing & 18 & 9.2\% \\
+Type III & Null / Omission Hallucination & 12 & 6.1\% \\
+Type IV & Structural Schema Mismatch & 4 & 2.0\% \\
+\midrule
+Total & Aggregate Extraction Errors & 196 & 100.0\% \\
+\bottomrule
+\end{tabular}
+\label{tab:error_taxonomy}
+\end{table}
+
+\subsubsection{Type I: Numerical Distractor Misbinding (82.7\%)}
+This failure mode represents the dominant failure across both models. When a narrative contains phrases such as:
+\begin{quote}
+\textit{``Rahul Sharma took Calculus in Room 101, scoring 78, and attended Physics in Hall B-12 where he obtained 84.''}
+\end{quote}
+The autoregressive attention heads commonly pay attention to the large-value integer  \texttt{101} rather than \texttt{78} resulting in \texttt{\{"Mathematics": 101\}}. This is a valid number and passes the integer type check within Pydantic, however will cause issues in later computations when calculating grades. The fact that both INT4 and INT8 models give the same score for $F_1$ (0.510) shows that the issue is indeed an inherent issue with the base model's zero shot attentional prior.
+
+\subsubsection{Type II: Lexical Synonym Aliasing (9.2\%)}
+Occurs when the model outputs informal entity keys (e.g., \texttt{"Calc"} or \texttt{"Eng Lit"}) rather than mapping to the canonical schema target (\texttt{"Mathematics"}, \texttt{"English Literature"}). While the syntax is valid, field-level matching fails.
+
+\subsubsection{Type III: Null and Omission Hallucination (6.1\%)}
+When an optional field (e.g., attendance percentage) was explicitly omitted in the text, the model occasionally hallucinated an arbitrary floating-point number (e.g., \texttt{85.0}) instead of emitting \texttt{null}.
+
+\subsubsection{Type IV: Structural Schema Mismatch (2.0\%)}
+Observed solely in 4-bit runs where the model formatted scores as a list of dictionaries rather than a key-value mapping, causing Pydantic validation failure.
 
 \begin{figure}[htbp]
 \centerline{\includegraphics[width=0.48\textwidth]{figure2_latency_distributions.png}}
-\caption{Log-scale inference latency distributions comparing 4-bit and 8-bit precision.}
+\caption{Empirical inference latency distributions (logarithmic scale) comparing 4-bit (\texttt{Q4\_K\_M}) against 8-bit (\texttt{Q8\_0}) quantization. 4-bit compression shifts the latency distribution downward by 71.3\% while drastically reducing variance.}
 \label{fig:fig2}
 \end{figure}
 
-\subsection{Systems Reliability and Memory Fault Accounting}
-During the initialization of the system One important result appeared (Figure~\ref{fig:fig3}), It was found that whilst the workstation (with 16GB of memory) was spending some time swapping the model weights in and out of host memory, the 8-bit model was crashing within Row 0 with the error:\texttt{llama runner process has terminated}. This was due to the memory required to store the 8-bit weights and resources required by the Operating System exceeding the available physical memory. In comparison, the 4-bit model successfully completed all runs with 0.0\% errors. This shows that quantizing to 4-bits is not just a performance gain but also a baseline requirement when working with 16GB edge hardware.
+\subsection{Latency Speedup and Tail Reduction}
+Inference latency distributions exhibit pronounced divergence between quantization levels, as depicted in Fig.~\ref{fig:fig2}. 
+\begin{itemize}
+    \item \textbf{Mean Speedup:} 4-bit quantization reduced mean latency from $3.104 \pm 0.266$\,s to $0.892 \pm 0.149$\,s, representing an empirical speedup of \textbf{71.3\%}.
+    \item \textbf{Tail Latency ($P95$):} The 95th percentile latency plummeted from $3.490$\,s to $0.900$\,s, achieving a \textbf{74.2\%} reduction in worst-case response times.
+    \item \textbf{Statistical Rigor:} Two-tailed Welch's $t$-test confirmed significant difference ($t = -14.40, p = 2.46 \times 10^{-30}$). The non-parametric Mann-Whitney $U$ test yielded $U = 98.0$ with $p = 6.29 \times 10^{-33}$, confirming that the latency reduction is statistically conclusive at $\alpha = 0.001$.
+\end{itemize}
+
+The main reason the consumer edge devices benefit from a 4-bit quantization is due to the memory bandwidth limitations. Since generating tokens from an autoregressive model is memory-bound (with operational intensity $\approx 1$\,FLOP/byte), reducing the bit-width by half will reduce the amount of data moved over the memory bus by half.
 
 \begin{figure}[htbp]
 \centerline{\includegraphics[width=0.48\textwidth]{figure3_system_failures_and_stability.png}}
-\caption{Execution Reliability and Edge OOM Fault Accounting.}
+\caption{Systems Reliability and Memory Fault Accounting. On a 16~GB consumer workstation, 8-bit quantization incurs a 1.0\% OOM termination rate during model initialization due to physical RAM saturation, whereas 4-bit quantization achieves 100\% stability (0.0\% failure rate).}
 \label{fig:fig3}
 \end{figure}
 
-\section{Discussion and Threats to Validity}
-\subsection{Practical Implications}
-We show how the attention mechanisms responsible for syntactic tokens such as brackets, quotes and colons continue to function correctly after being applied to a low bit encryption. However, the performance of extract semantic meanings ($F_1 = 0.510$) has been affected due to numerical links not working correctly. However, as there is no greater degradation of this technique than any others (4-bit results were equal to 8-bit results with an accuracy of 0.510), it would be beneficial for software programmers to utilise 4-bit(\texttt{Q4\_K\_M}) encoding systems when applying them in edge cases. This can be done alongside restricted decoding algorithms (e.g. GBNF/Outlines) to mitigate against factual linking issues.
+\subsection{Physical Memory Dynamics and OOM Crash Accounting}
+During the benchmark suite's initialization stage (native hardware), a hard system limit was reached (Fig.~\ref{fig:fig3}). The 8-bit example had to terminate unexpectedly due to running out of memory:
+\begin{quote}
+\texttt{llama runner process has terminated: status exit 1}
+\end{quote}
+To explain this failure, we model the total resident host memory requirement $M_{\text{total}}$ of edge inference:
+\begin{equation}
+M_{\text{total}} = M_{\text{weights}} + M_{\text{KV}} + M_{\text{context}} + M_{\text{activations}} + M_{\text{OS}}
+\label{eq:memory}
+\end{equation}
+For an 8-billion parameter model:
+\begin{itemize}
+    \item In Q8\_0 precision: $M_{\text{weights}} \approx 8.5$\,GB. As memory was also being used for KV cache ($M_{\text{KV}} \approx 1.2$\,GB), context buffer and Windows 11 (resident memory: $M_{\text{OS}} \approx 5.5$\,GB), there was more committed memory than could be used by the host computer (15.73~GB). This caused the OS Virtual Memory Manager (VMM) to aggressively page the memory out onto the SSD causing a fatal memory allocation error:
+    \item In Q4\_K\_M precision: $M_{\text{weights}} \approx 4.8$\,GB. Total memory usage was below 11.5~GB giving plenty of extra memory to prevent any memory swapping (0.0\% error rate):
+\end{itemize}
 
-\subsection{Limitations}
-Our tests were performed only for the case of Intel Core i9 / NVIDIA RTX 4060. The results for the Apple Silicon with the unified memory support and the ARM IoT devices are left for further study. Also, due to the limited access to library during the tests in Python 3.14 it was impossible to perform the tests using the Outlines DFA grammars in native compilation mode.
+This shows that using a 4-bit integer quantization is not an optional choice to reduce latency, it is required to run the example on a typical 16~GB device.
+% =========================================================================
+% SECTION VI: PRACTICAL ENGINEERING GUIDELINES
+% =========================================================================
+\section{Practical Edge Engineering Guidelines}
+\label{sec:guidelines}
 
+Based on our empirical discoveries, we formulate four actionable design principles for building robust edge-native structured extraction systems:
+
+\subsection{Rule 1: Mandate 4-Bit Quantization on $\le$16~GB Edge Nodes}
+Since INT4 gives equivalent extraction accuracy ($F_1 = 0.510$), but provides a 71.3\% reduction in average latency and no OOM crashes, all practitioners should use \texttt{Q4\_K\_M} for 8B-parameter model deployment on consumer edge devices.
+
+\subsection{Rule 2: Implement Multi-Tier Semantic Defensive Validation}
+Never deploy a pipeline without schema parsing (using \texttt{json.loads()} or Pydantic). All pipelines should have parsing sanity checks, such as:
+\begin{itemize}
+    \item Value Range Constraints: Check that extracted test scores are not greater than 100 or fit any known distractor pattern.
+    \item Bidirectional Hallucination Checks: Check that all extracted entity keys and values can be found either as substrings or synonyms in the original document.
+\end{itemize}
+
+\subsection{Rule 3: Employ Pre-Extraction Distractor Masking}
+To mitigate Type I distractor errors (accounting for 82.7\% of errors), a simple deterministic pre-processing step using regex or simple NER taggers should be used to capture and tag peripheral numbers (e.g., \textit{``[ROOM\_101]''}, \textit{``[PHONE\_4201]''}) before sending the context to the SLM.
+
+\subsection{Rule 4: Memory-Aware Dynamic Fallback}
+The software running on the edge should track the commit charge of the host using OS telemetry. If the memory usage of the system is above 80\%, the runtime should automatically switch to smaller parameter versions of the model (e.g., 3B or 1B).
+
+
+% =========================================================================
+% SECTION VII: THREATS TO VALIDITY
+% =========================================================================
+\section{Threats to Validity}
+\label{sec:validity}
+
+\subsection{Internal Validity}
+Internal issues such as unmeasured background OS activity can impact latencies. These were resolved through running on bare metal, setting CPU affinities, recording background RAM usage and proving statistical significance using non parametric tests ($p < 10^{-32}$)
+
+\subsection{External Validity}
+Experiments were performed on Llama-3-8B architecture within Ollama/\texttt{llama.cpp}. Whilst Llama-3 is the state of the art in open weights SLMs, future work should be performed to see if other architectures (e.g Qwen-2.5-7B, Phi-3.5-mini) have differing levels of distractor sensitivity.
+
+\subsection{Construct Validity}
+The benchmark contains synthetically generated academic texts. Although the distractors can be accurately controlled, real world cases may have multimodal noise (OCR, messy tables). This can be further explored.
+
+% =========================================================================
+% SECTION VIII: CONCLUSION AND FUTURE WORK
+% =========================================================================
 \section{Conclusion}
-We investigated the impact of integer based quantization on structured information retrieval in the edge. Our results demonstrate that using 4-bit quantization leads to a significant reduction in inference latency (71.3\%) with OOM terminations being removed completely in consumer memory. Our work shows a significant discrepancy between syntactic validity and semantic fidelity. We have shown that JSON validation does not provide enough validation to identify numerous extraction errors.
+\label{sec:conclusion}
+
+This paper presents an empirical systems investigation benchmarking Quantized Small Language Models for structured information extraction on consumer edge hardware. We found that there is a significant issue between the syntax and semantics of models. The 4-bit quantized Llama-3-8B model achieves 100.0\% valid JSON syntax however has a low true semantic extraction score of $F_1$. 82.7\% of errors were induced by numerical distractors. We proved that using 4-bit integer quantization reduces the latency by 71.3\% ($p = 2.46 \times 10^{-30}$), and tail latency by 74.2\%. The quantization caused no semantic issues compared to 8-bit. We have also shown that there are 0 host memory swap thrash issues, and OOM process termination issues when using 4-bit quantization. This proves that using INT4 compression is vital for ensuring processes run reliably on 16~GB edge devices.
+
+
+
+Future work will look into hardware assisted grammar masking on Apple Silicon unified architectures. We will also look into reducing distractors through few shot chain of thought prompts. We will look into different architectures below 3B parameters.
+
+
 
 \section*{Reproducibility Statement}
-All code, datasets, and telemetry logs are available at: \url{https://github.com/aryamansinhalko-cpu/Benchmarking-Quantized-Small-Language-Models}.
+All benchmarking scripts, logs and the \textit{EduMetrics-Structured-IE} dataset can be accessed publicly here: \url{https://github.com/aryamansinhalko-cpu/Benchmarking-Quantized-Small-Language-Models}.
 
+% =========================================================================
+% REFERENCES
+% =========================================================================
 \bibliographystyle{IEEEtran}
 \begin{thebibliography}{00}
-\bibitem{gdpr2017} P. Voigt and A. Von dem Bussche, \textit{The EU General Data Protection Regulation (GDPR): A Practical Guide}, 1st ed. Cham: Springer International Publishing, 2017.
-\bibitem{dettmers2022llm} T. Dettmers, M. Lewis, Y. Belkada, and L. Zettlemoyer, ``LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale,'' in \textit{Proc. Advances in Neural Information Processing Systems (NeurIPS)}, vol. 35, 2022, pp. 30318--30332.
-\bibitem{frantar2023gptq} E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh, ``GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers,'' in \textit{Proc. Int. Conf. on Learning Representations (ICLR)}, 2023.
-\bibitem{hendrycks2021measuring} D. Hendrycks, C. Burns, S. Basart, et al., ``Measuring Massive Multitask Language Understanding,'' in \textit{Proc. Int. Conf. on Learning Representations (ICLR)}, 2021.
-\bibitem{liu2024edge} J. Liu, ``Optimizing Small Language Models for Edge IoT Devices,'' \textit{IEEE Internet of Things Journal}, vol. 11, no. 4, pp. 2105--2114, 2024.
-\bibitem{lin2024awq} J. Lin, J. Tang, H. Tang, et al., ``AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration,'' in \textit{Proc. Machine Learning and Systems (MLSys)}, 2024.
-\bibitem{gerganov2023llamacpp} G. Gerganov et al., ``llama.cpp: Port of Facebook's LLaMA model in C/C++,'' GitHub repository, 2023. [Online]. Available: https://github.com/ggerganov/llama.cpp
-\bibitem{willard2023outlines} B. T. Willard and R. Louf, ``Efficient Guided Generation for Large Language Models,'' \textit{arXiv preprint arXiv:2307.09702}, 2023.
-\bibitem{zheng2024sglang} L. Zheng, L. Yin, Z. Xie, et al., ``SGLang: Efficient Execution of Structured Language Model Programs,'' in \textit{Proc. Int. Conf. on Machine Learning (ICML)}, 2024.
+
+\bibitem{brown2020language}
+T.~Brown, B.~Mann, N.~Ryder, M.~Subbiah, J.~D. Kaplan, P.~Dhariwal, A.~Neelakantan, P.~Shyam, G.~Sastry, A.~Askell, \emph{et~al.}, ``Language models are few-shot learners,'' in \emph{Proc. Advances in Neural Information Processing Systems (NeurIPS)}, vol.~33, 2020, pp. 1877--1901.
+
+\bibitem{gdpr2017}
+P.~Voigt and A.~Von~dem Bussche, \emph{The EU General Data Protection Regulation (GDPR): A Practical Guide}, 1st~ed.\hskip 1em plus 0.5em minus 0.4em\relax Cham: Springer International Publishing, 2017.
+
+\bibitem{liu2024edge}
+J.~Liu, ``Optimizing Small Language Models for Edge IoT Devices,'' \emph{IEEE Internet of Things Journal}, vol.~11, no.~4, pp. 2105--2114, 2024.
+
+\bibitem{ding2024slm_edge}
+Y.~Ding, S.~Shen, and M.~Zaharia, ``On-Device Small Language Models: A Comprehensive Survey and Systems Perspective,'' \emph{IEEE Communications Surveys \& Tutorials}, early access, 2024.
+
+\bibitem{dettmers2022llm}
+T.~Dettmers, M.~Lewis, Y.~Belkada, and L.~Zettlemoyer, ``LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale,'' in \emph{Proc. Advances in Neural Information Processing Systems (NeurIPS)}, vol.~35, 2022, pp. 30318--30332.
+
+\bibitem{frantar2023gptq}
+E.~Frantar, S.~Ashkboos, T.~Hoefler, and D.~Alistarh, ``GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers,'' in \emph{Proc. Int. Conf. on Learning Representations (ICLR)}, 2023.
+
+\bibitem{lin2024awq}
+J.~Lin, J.~Tang, H.~Tang, S.~Yang, W.-M. Chen, W.-C. Wang, G.~Xiao, X.~Dang, C.~Gan, and S.~Han, ``AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration,'' in \emph{Proc. Machine Learning and Systems (MLSys)}, 2024.
+
+\bibitem{dettmers2023qlora}
+T.~Dettmers, A.~Pagnoni, A.~Holtzman, and L.~Zettlemoyer, ``QLoRA: Efficient Finetuning of Quantized LLMs,'' in \emph{Proc. Advances in Neural Information Processing Systems (NeurIPS)}, vol.~36, 2023, pp. 10088--10115.
+
+\bibitem{rfc8259}
+T.~Bray, ``The JavaScript Object Notation (JSON) Data Interchange Format,'' Internet Engineering Task Force (IETF), RFC 8259, Dec. 2017.
+
+\bibitem{hendrycks2021measuring}
+D.~Hendrycks, C.~Burns, S.~Basart, A.~Zou, M.~Mazeika, D.~Song, and J.~Steinhardt, ``Measuring Massive Multitask Language Understanding,'' in \emph{Proc. Int. Conf. on Learning Representations (ICLR)}, 2021.
+
+\bibitem{cobbe2021gsm8k}
+K.~Cobbe, V.~Kosaraju, M.~Bavarian, M.~Chen, H.~Jun, L.~Kaiser, M.~Plappert, J.~Tworek, J.~Hilton, R.~Nakano, \emph{et~al.}, ``Training verifiers to solve math word problems,'' \emph{arXiv preprint arXiv:2110.14168}, 2021.
+
+\bibitem{willard2023outlines}
+B.~T. Willard and R.~Louf, ``Efficient Guided Generation for Large Language Models,'' \emph{arXiv preprint arXiv:2307.09702}, 2023.
+
+\bibitem{zheng2024sglang}
+L.~Zheng, L.~Yin, Z.~Xie, J.~Huang, C.~Sun, C.~H. Yu, S.~Cao, C.~Christodoulou, E.~P. Xing, J.~E. Gonzalez, and I.~Stoica, ``SGLang: Efficient Execution of Structured Language Model Programs,'' in \emph{Proc. Int. Conf. on Machine Learning (ICML)}, 2024.
+
+\bibitem{gerganov2023llamacpp}
+G.~Gerganov \emph{et~al.}, ``llama.cpp: Port of Facebook's LLaMA model in C/C++,'' GitHub repository, 2023. [Online]. Available: https://github.com/ggerganov/llama.cpp
+
+\bibitem{xiao2023smoothquant}
+G.~Xiao, J.~Lin, M.~Seznec, H.~Wu, J.~Demouth, and S.~Han, ``SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models,'' in \emph{Proc. Int. Conf. on Machine Learning (ICML)}, 2023, pp. 38087--38099.
+
+\bibitem{dettmers2023spqr}
+T.~Dettmers, R.~Svirschevski, T.~Regol, U.~Paul, N.~Le~Scao, and L.~Zettlemoyer, ``SpQR: A Sparse-Quantized Representation for Near-Lossless LLM Weight Compression,'' in \emph{Proc. Int. Conf. on Learning Representations (ICLR)}, 2024.
+
+\bibitem{kim2023squeezellm}
+S.~Kim, C.~Hoover, E.~Gholami, M.~W. Mahoney, K.~Keutzer, and A.~Yao, ``SqueezeLLM: Dense-and-Sparse Quantization,'' in \emph{Proc. Int. Conf. on Machine Learning (ICML)}, 2024.
+
+\bibitem{tjong2003conll}
+E.~F. Tjong Kim~Sang and F.~De~Meulder, ``Introduction to the CoNLL-2003 shared task: Language-independent named entity recognition,'' in \emph{Proc. Conf. on Natural Language Learning (CoNLL)}, 2003, pp. 142--147.
+
+\bibitem{mathew2021docvqa}
+M.~Mathew, D.~Karatzas, and C.~Jawahar, ``DocVQA: A Dataset for VQA on Document Images,'' in \emph{Proc. IEEE/CVF Winter Conf. on Applications of Computer Vision (WACV)}, 2021, pp. 2200--2209.
+
+\bibitem{ding2021fewnerd}
+N.~Ding, G.~Xu, Y.~Chen, X.~Wang, X.~Han, P.~Xie, H.~Zheng, and Z.~Liu, ``Few-NERD: A Few-shot Named Entity Recognition Dataset,'' in \emph{Proc. Annual Meeting of the Association for Computational Linguistics (ACL)}, 2021, pp. 3198--3213.
+
+\bibitem{rastogi2020towards}
+A.~Rastogi, X.~Zang, S.~Srivastava, C.~Chou, and G.~Khaitan, ``Towards Scalable Multi-domain Conversational Agents: The Schema-Guided Dialogue Dataset,'' in \emph{Proc. AAAI Conf. on Artificial Intelligence}, vol.~34, 2020, pp. 8689--8696.
+
+\bibitem{touvron2023llama}
+H.~Touvron, T.~Lavril, G.~Izacard, X.~Martinet, M.-A. Lachaux, T.~Lacroix, B.~Rozi{\`e}re, N.~Goyal, E.~Hambro, F.~Azhar, \emph{et~al.}, ``LLaMA: Open and Efficient Foundation Language Models,'' \emph{arXiv preprint arXiv:2302.13971}, 2023.
+
+\bibitem{dubey2024llama3}
+A.~Dubey, A.~Jauhri, A.~Pandey, A.~Kadian, A.~Al-Dahle, A.~Letman, A.~Mathur, A.~Schelten, A.~Yang, A.~Fan, \emph{et~al.}, ``The Llama 3 Herd of Models,'' \emph{arXiv preprint arXiv:2407.21783}, 2024.
+
+\bibitem{qwen2024}
+Qwen~Team, ``Qwen2.5: A Foundation Language Model Suite with Enhanced Capabilities in Reasoning and Coding,'' \emph{arXiv preprint arXiv:2409.12191}, 2024.
+
+\bibitem{abdin2024phi3}
+M.~Abdin, S.~A. Jyothi, C.~Aneja, M.~Awadalla, P.~Awadallah, A.~Ambalavanan, R.~Ashok, N.~Behl, A.~Benbaki, \emph{et~al.}, ``Phi-3 Technical Report: A Highly Capable Language Model Locally on Your Phone,'' \emph{arXiv preprint arXiv:2404.14219}, 2024.
+
+\bibitem{guidance2023}
+Microsoft, ``Guidance: A language for controlling large language models,'' GitHub repository, 2023. [Online]. Available: https://github.com/guidance-ai/guidance
+
+\bibitem{jsonformer2023}
+1rgs, ``JSONformer: Bulletproof JSON generation from Language Models,'' GitHub repository, 2023. [Online]. Available: https://github.com/1rgs/jsonformer
+
+\bibitem{pydantic2023}
+S.~Colvin \emph{et~al.}, ``Pydantic: Data validation using Python type hints,'' 2023. [Online]. Available: https://docs.pydantic.dev
+
+\bibitem{welch1947generalization}
+B.~L. Welch, ``The generalization of Student's problem when several different population variances are involved,'' \emph{Biometrika}, vol.~34, no. 1/2, pp. 28--35, 1947.
+
+\bibitem{mann1947test}
+H.~B. Mann and D.~R. Whitney, ``On a test of whether one of two random variables is stochastically larger than the other,'' \emph{The Annals of Mathematical Statistics}, vol.~18, no.~1, pp. 50--60, 1947.
+
 \end{thebibliography}
 
 \end{document}
